@@ -2,18 +2,24 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 	"github.com/espadrine/binaryrating"
 )
 
 const (
-  trueRatingMean = 400
+  populationSize = 10
+  numberOfComparisons = 100
+  // The true rating mean is actually how uniform
+  // the exponential sampling is, ie. how much overlap there is
+  // in sampled ratings between competitors (high = low overlap).
+  trueRatingMean = 1000
 )
 
 func main() {
 	// We have a set of people that have a hidden ranking.
-	pop := newPopulation(10)
+	pop := newPopulation(populationSize)
 	popIndex := buildPopulationIndex(pop)
 
 	// We gather information from binary comparisons.
@@ -21,8 +27,7 @@ func main() {
 	// each person compared pairwise has a momentary performance ranking which is
 	// taken from a logistic distribution whose mean is the hidden ranking,
 	// and whose variance is constant.
-	tsize := 400 // number of binary comparisons in the tournament.
-	tournament := newTournament(pop, tsize)
+	tournament := newTournament(pop, numberOfComparisons)
 
 	// Run the Minorization-Maximization algorithm on the Bradley-Terry model
 	// applied to the tournament.
@@ -30,26 +35,45 @@ func main() {
 	sort.Slice(rated, func(i, j int) bool {
 		return rated[i].LogisticRating() < rated[j].LogisticRating()
 	})
+
+	// Since the rating’s zero value is arbitrary,
+	// we offset the ratings to match, so we can compare with true rating.
+	offset := float64(0)
 	for _, c := range rated {
-		fmt.Println(c.ID, "Estimated:", c.LogisticRating(), "\tTrue:", popIndex[c.ID].trueRating)
+		offset += c.LogisticRating() - ratingFromScore(popIndex[c.ID].trueScore)
+	}
+	offset /= float64(len(rated))
+
+	for _, c := range rated {
+		fmt.Println(c.ID, "Estimated:", c.LogisticRating(), "±", c.LogisticRatingConfidenceInterval(0.99), "\tTrue:", ratingFromScore(popIndex[c.ID].trueScore) + offset)
 	}
 }
 
 type Competitor struct {
-	id         binaryrating.CompetitorID
-	trueRating float64
+	id        binaryrating.CompetitorID
+	trueScore float64
 }
 
 func newPopulation(size int) []Competitor {
 	pop := make([]Competitor, size)
 	for i := 0; i < size; i++ {
-		// Assume the true ratings are normally distributed.
+		// Assume the true ratings are exponentially distributed.
+		// In other words: there are more people with lower ratings.
+		rating := trueRatingMean * rand.ExpFloat64()
 		pop[binaryrating.CompetitorID(i)] = Competitor{
 		  id: binaryrating.CompetitorID(i),
-		  trueRating: trueRatingMean * rand.ExpFloat64(),
+		  trueScore: scoreFromRating(rating),
 		}
 	}
 	return pop
+}
+
+func ratingFromScore(score float64) float64 {
+  return 250*math.Log(score)
+}
+
+func scoreFromRating(rating float64) float64 {
+  return math.Exp(rating/250)
 }
 
 func buildPopulationIndex(population []Competitor) map[binaryrating.CompetitorID]Competitor {
@@ -70,7 +94,7 @@ func newTournament(population []Competitor, size int) []binaryrating.Comparison 
 			i -= 1
 			continue
 		}
-		winProb := c0.trueRating / (c0.trueRating + c1.trueRating)
+		winProb := c0.trueScore / (c0.trueScore + c1.trueScore)
 		if winProb > rand.Float64() {
 			comp[i] = binaryrating.Comparison{c0.id, c1.id}
 		} else {

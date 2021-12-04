@@ -15,8 +15,13 @@ type RatedCompetitor struct {
 	ID           CompetitorID
 	score        float64
 	wins         uint64
+	matches      uint64
 	pairwiseWins map[CompetitorID]uint64
 }
+
+const (
+	logisticScale = 250
+)
 
 // Take a list of sampled comparisons between competitors that each have a
 // hidden rating such that the likelihood of a competitor being selected as
@@ -73,9 +78,12 @@ func EstimateRatings(tournament []Comparison) []RatedCompetitor {
 
 	// Compute the number of wins for each competitor.
 	for _, t := range tournament {
-		c := rcIdx[t.HigherCompetitorID]
-		(*c).wins += 1
-		pw := (*c).pairwiseWins
+		hc := rcIdx[t.HigherCompetitorID]
+		lc := rcIdx[t.LowerCompetitorID]
+		(*hc).wins += 1
+		(*hc).matches += 1
+		(*lc).matches += 1
+		pw := (*hc).pairwiseWins
 		pw[t.LowerCompetitorID] += 1
 	}
 
@@ -122,29 +130,62 @@ func EstimateRatings(tournament []Comparison) []RatedCompetitor {
 // the relative probabilities associated with a rating difference.
 // We choose to set Φ(10) = 0.510, which makes it so that a rating difference
 // of Δ approximatively indicates a winning chance of 0.5 + Δ÷1000.
+// In other words a 10-point difference indicates a 1% increase in win rate,
+// and from linear approximation,
+// being 250 points lower indicates roughly a 25% chance.
 //
-// Two typical cases are computed below:
-// - assuming that instantaneous performance is normally distributed,
-//   the difference in performance is also Gaussian.
-//   Using a normal distribution is often
-//   a statistician’ way of saying “I don’t know.”
-//   Then Φ(Δrating) = 1÷sqrt(2π) ∫t∈[-∞,Δrating÷σ] exp(-t^2÷2) dt.
-//   From Φ(10) = 0.51, we get σ = 399.
-// - assuming that instantaneous performance follows a Gumbel distribution,
-//   the difference follows the logistic distribution.
-//   The Gumbel is a good fit for human performance,
-//   because it can describe maximum effort.
-//   Then Φ(Δrating) = 1÷(1+exp(-Δrating÷s)).
-//   From Φ(10) = 0.51, we get:
-//   1÷(1+exp(-10÷s)) = 0.51 ⇒ s = -10÷ln(1÷0.51 - 1) = 250.
-//   From Bradley-Terry, we have Φ(r1-r2) = s1÷(s1+s2) = 1÷(1+s2÷s1).
-//   Thus exp(-(r1-r2)÷s) = s2÷s1 ⇒ r1 = r2 + s×(ln(s1)-ln(s2)).
+// We assume that instantaneous performance follows a Gumbel distribution.
+// The difference follows the logistic distribution.
+// The Gumbel is a good fit for human performance,
+// because it can describe maximum effort.
+// Then Φ(Δrating) = 1÷(1+exp(-Δrating÷s)).
+// From Φ(10) = 0.51, we get:
+// 1÷(1+exp(-10÷s)) = 0.51 ⇒ s = -10÷ln(1÷0.51 - 1) = 250.
+// From Bradley-Terry, we have Φ(r1-r2) = s1÷(s1+s2) = 1÷(1+s2÷s1).
+// Thus exp(-(r1-r2)÷s) = s2÷s1 ⇒ r1 = r2 + s×(ln(s1)-ln(s2)).
 //
 // These ideas are inspired by Arpad Elo’s paper; see page 137:
 // https://www.gwern.net/docs/statistics/comparison/1978-elo-theratingofchessplayerspastandpresent.pdf
 
 // Return a normalized rating, assuming competitors’ sampled performance
-// is taken from a Gumbel distribution.
+// is taken from a Gumbel distribution, or more generally,
+// any rating difference follows a logistic distribution.
+//
+// A rating difference of Δ approximatively indicates
+// a winning chance of 0.5 + Δ÷1000.
+// In other words a 10-point difference indicates a 1% increase in win rate,
+// and from linear approximation,
+// being 250 points lower indicates roughly a 25% chance.
 func (rc *RatedCompetitor) LogisticRating() float64 {
-	return 250 * math.Log(rc.score)
+	return logisticScale * math.Log(rc.score)
+}
+
+// We want to compute the confidence interval of the rating
+// assuming it is sampled from a Gumbel distribution.
+// Essentially, we can consider each comparison like a single sampling.
+// Since there are two ratings being compared,
+// the comparison accounts for half a sampling on each rating.
+// For N samples, the corresponding estimated mean would act like
+// the average of the samples, and the variance would thus become
+// var(ΣRi÷N) = Σvar(Ri)÷N² = σ²÷N where σ² is the constant rating variance.
+// Per the central limit theorem, ΣRi is akin to a normal distribution.
+// The interval is: rating ± sqrt(2σ²÷N) erf^-1(2ρ-1),
+// where ρ is the confidence level (eg. 0.95).
+//
+// The variance of the Gumbel distribution is σ² = β²π²÷6.
+// The variance of the difference of two Gumbel distributions
+// (our rating difference) is 2σ² = s²π²÷3,
+// where s is the scale of the corresponding logistic distribution.
+// Since we computed the scale to be set to s = 250,
+// we get σ² = 250²π²÷6.
+// Thus the interval is: rating ± 250π×sqrt(⅔÷N) erf^-1(2ρ-1).
+
+// Return the delta to the mean of the rating produced by LogisticRating(),
+// for a confidence interval at level ρ
+// (eg. 0.95 for a 95% confidence level).
+//
+// It is estimated from the number of comparisons the competitor had,
+// assuming the difference in ratings follows a logistic distribution.
+func (rc *RatedCompetitor) LogisticRatingConfidenceInterval(ρ float64) float64 {
+	return (logisticScale * math.Pi * math.Sqrt(2.0/3)) / math.Sqrt(float64(rc.matches)) * math.Erfinv(2.0*ρ-1)
 }
